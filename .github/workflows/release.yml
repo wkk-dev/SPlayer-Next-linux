@@ -28,18 +28,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Windows x64
-            runner: windows-latest
-            target: windows-x64
-          - name: Windows arm64
-            runner: windows-11-arm
-            target: windows-arm64
-          - name: macOS x64
-            runner: macos-15-intel
-            target: macos-x64
-          - name: macOS arm64
-            runner: macos-latest
-            target: macos-arm64
           - name: Linux x64
             runner: ubuntu-latest
             target: linux-x64
@@ -87,12 +75,6 @@ jobs:
             rpm libarchive-tools
 
       # 清理旧构建产物
-      - name: Clean workspace on Windows
-        if: runner.os == 'Windows'
-        run: |
-          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
-          if (Test-Path out) { Remove-Item -Recurse -Force out }
-
       - name: Clean workspace on macOS & Linux
         if: runner.os != 'Windows'
         run: rm -rf dist out
@@ -114,18 +96,6 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: |
           case "${{ matrix.target }}" in
-            windows-x64)
-              pnpm build:win --x64 --publish never
-              ;;
-            windows-arm64)
-              pnpm build:win --arm64 --publish never
-              ;;
-            macos-x64)
-              pnpm build:mac --x64 --publish never
-              ;;
-            macos-arm64)
-              pnpm build:mac --arm64 --publish never
-              ;;
             linux-x64)
               pnpm build:linux --x64 --publish never
               ;;
