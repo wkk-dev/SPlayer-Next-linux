@@ -1,9 +1,12 @@
-# tag（v*）触发
+# tag（v*）触发或 commit 描述中包含"构建版本vXX.XX"时自动创建 tag
 # 各架构原生 runner 构建 → 合并清单 → 创建 GitHub 草稿 Release
 name: Release
 
 on:
   push:
+    branches:
+      - main
+      - dev
     tags:
       - "v*"
   workflow_dispatch:
@@ -20,9 +23,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 检测 commit 中的版本号并创建 tag
+  check-and-create-tag:
+    name: Check and Create Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.extract-version.outputs.tag }}
+      should-build: ${{ steps.extract-version.outputs.should-build }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from commit message
+        id: extract-version
+        shell: bash
+        run: |
+          # 获取最新 commit 信息
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Latest commit message: $COMMIT_MSG"
+          
+          # 检查是否已经是 tag 触发（refs/tags/v*）
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            TAG="${{ github.ref_name }}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "已是 tag 触发，使用现有 tag: $TAG"
+          # 检查 commit 信息中是否包含"构建版本vXX.XX"格式
+          elif [[ $COMMIT_MSG =~ 构建版本(v[0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+            TAG="${BASH_REMATCH[1]}"
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "检测到版本号: $TAG"
+            
+            # 检查 tag 是否已存在
+            if git rev-parse "$TAG" >/dev/null 2>&1; then
+              echo "Tag $TAG 已存在，将直接使用"
+            else
+              # 创建并推送 tag
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag -a "$TAG" -m "Auto-release: $TAG from commit $(git rev-parse --short HEAD)"
+              git push origin "$TAG"
+              echo "已创建并推送 tag: $TAG"
+            fi
+          else
+            echo "should-build=false" >> $GITHUB_OUTPUT
+            echo "tag=" >> $GITHUB_OUTPUT
+            echo "Commit 中未检测到版本号，跳过构建"
+          fi
+
   # 各平台/架构在对应的原生 runner 上独立构建
   build:
     name: Build on ${{ matrix.name }}
+    needs: check-and-create-tag
+    if: needs.check-and-create-tag.outputs.should-build == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -37,6 +93,8 @@ jobs:
     steps:
       - name: Check out git repository
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.check-and-create-tag.outputs.tag }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -56,12 +114,13 @@ jobs:
 
       # 校验 tag 与 package.json 版本一致
       - name: Verify tag matches version
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
+          TAG="${{ needs.check-and-create-tag.outputs.tag }}"
           PKG_VERSION="v$(node -p "require('./package.json').version")"
-          if [ "$PKG_VERSION" != "$GITHUB_REF_NAME" ]; then
-            echo "标签 $GITHUB_REF_NAME 与 package.json 版本 $PKG_VERSION 不一致"
+          if [ "$PKG_VERSION" != "$TAG" ]; then
+            echo "标签 $TAG 与 package.json 版本 $PKG_VERSION 不一致"
+            echo "请确保 package.json 中的版本号与 commit 消息中的版本号匹配"
             exit 1
           fi
 
@@ -131,13 +190,15 @@ jobs:
   # 合并多架构更新清单并创建 GitHub 草稿 Release
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, check-and-create-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.check-and-create-tag.outputs.tag }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -165,7 +226,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ needs.check-and-create-tag.outputs.tag }}"
           # 重跑场景：若同名 release 已存在则先删除，避免脏状态（保留 tag）
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
@@ -174,6 +235,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --generate-notes \
-            --verify-tag \
             --draft \
             release-assets/*
